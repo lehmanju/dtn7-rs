@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
-use tokio::sync::mpsc::channel;
 
 // transmit an outbound bundle.
 pub async fn send_bundle(bndl: Bundle) {
@@ -39,42 +38,9 @@ pub async fn send_bundle(bndl: Bundle) {
     });
 }
 
-pub fn send_through_task(bndl: Bundle) {
-    let mut stask = crate::SENDERTASK.lock();
-    if stask.is_none() {
-        let (tx, rx) = channel(50);
-        tokio::spawn(sender_task(rx));
-        *stask = Some(tx);
-    }
-    let tx = stask.as_ref().unwrap().clone();
-    //let mut rt = tokio::runtime::Runtime::new().unwrap();
-    let rt = tokio::runtime::Handle::current();
-    rt.spawn(async move { tx.send(bndl).await });
-}
-
-pub async fn send_through_task_async(bndl: Bundle) {
-    let mut stask = crate::SENDERTASK.lock();
-    if stask.is_none() {
-        let (tx, rx) = channel(50);
-        tokio::spawn(sender_task(rx));
-        *stask = Some(tx);
-    }
-    let tx = stask.as_ref().unwrap().clone();
-
-    if let Err(err) = tx.send(bndl).await {
-        warn!("Transmission failed: {}", err);
-    }
-}
-pub async fn sender_task(mut rx: tokio::sync::mpsc::Receiver<Bundle>) {
-    while let Some(bndl) = rx.recv().await {
-        debug!("sending bundle through task channel");
-        send_bundle(bndl).await;
-    }
-}
-
 // starts the transmission of an outbounding bundle pack. Therefore
 // the source's endpoint ID must be dtn:none or a member of this node.
-pub async fn transmit(mut bp: BundlePack) -> Result<()> {
+async fn transmit(mut bp: BundlePack) -> Result<()> {
     info!("Transmission of bundle requested: {}", bp.id());
 
     bp.add_constraint(Constraint::DispatchPending);
@@ -180,7 +146,7 @@ pub async fn receive(mut bndl: Bundle) -> Result<()> {
 }
 
 // handle the dispatching of received bundles.
-pub async fn dispatch(bp: BundlePack) -> Result<()> {
+async fn dispatch(bp: BundlePack) -> Result<()> {
     info!("Dispatching bundle: {}", bp.id());
 
     routing_notify(RoutingNotifcation::IncomingBundle(
@@ -235,7 +201,7 @@ async fn handle_primary_lifetime(bundle: &Bundle) -> Result<()> {
 }
 /// UpdateBundleAge updates the bundle's Bundle Age block based on its reception
 /// timestamp, if such a block exists.
-pub fn update_bundle_age(bundle: &mut Bundle) -> Option<u64> {
+fn update_bundle_age(bundle: &mut Bundle) -> Option<u64> {
     let bid = bundle.id();
     if let Some(block) = bundle.extension_block_by_type_mut(BUNDLE_AGE_BLOCK) {
         let mut new_age = 0; // TODO: lost fight with borrowchecker
@@ -414,7 +380,7 @@ pub async fn forward(mut bp: BundlePack) -> Result<()> {
     Ok(())
 }
 
-pub async fn local_delivery(mut bp: BundlePack) -> Result<()> {
+async fn local_delivery(mut bp: BundlePack) -> Result<()> {
     info!("Received bundle for local delivery: {}", bp.id());
 
     let bndl = store_get_bundle(bp.id());
@@ -455,14 +421,14 @@ pub async fn local_delivery(mut bp: BundlePack) -> Result<()> {
     bp.sync()?;
     Ok(())
 }
-pub fn contraindicated(mut bp: BundlePack) -> Result<()> {
+fn contraindicated(mut bp: BundlePack) -> Result<()> {
     info!("Bundle marked for contraindication: {}", bp.id());
     bp.add_constraint(Constraint::Contraindicated);
     bp.sync()?;
     Ok(())
 }
 
-pub async fn delete(mut bp: BundlePack, reason: StatusReportReason) -> Result<()> {
+async fn delete(mut bp: BundlePack, reason: StatusReportReason) -> Result<()> {
     let bndl = store_get_bundle(bp.id());
     if bndl.is_none() {
         bail!("bundle not found");
