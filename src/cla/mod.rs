@@ -9,6 +9,7 @@ use derive_more::*;
 use dummy::DummyConvergenceLayer;
 use enum_dispatch::enum_dispatch;
 use mtcp::MtcpConvergenceLayer;
+use tokio::io;
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 
@@ -49,7 +50,7 @@ impl std::fmt::Display for CLAEnum {
 #[async_trait]
 #[enum_dispatch(CLAEnum)]
 pub trait ConvergenceLayerAgent: Debug + Display {
-    async fn setup(&mut self);
+    fn setup(&mut self) -> tokio::task::JoinHandle<Result<(), io::Error>>;
     fn port(&self) -> u16;
     fn name(&self) -> &'static str;
     async fn scheduled_submission(&self, dest: &str, ready: &[ByteBuffer]) -> bool;

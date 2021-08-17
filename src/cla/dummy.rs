@@ -15,7 +15,7 @@ impl DummyConvergenceLayer {
 }
 #[async_trait]
 impl ConvergenceLayerAgent for DummyConvergenceLayer {
-    async fn setup(&mut self) {}
+    fn setup(&mut self) {}
 
     fn port(&self) -> u16 {
         0

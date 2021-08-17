@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 use super::{httpd, janitor};
-use crate::cla::ConvergenceLayerAgent;
-use crate::cla_add;
+use crate::cla::{self, ConvergenceLayerAgent};
 use crate::core::application_agent::SimpleApplicationAgent;
+use crate::core::store::{BundleStoresEnum, InMemoryBundleStore};
+use crate::core::{store, DtnStatistics};
 use crate::dtnconfig::DtnConfig;
 use crate::ipnd::neighbour_discovery;
 use crate::peers_add;
-use crate::{CONFIG, DTNCORE, STORE};
+use crate::{cla_add, routing, DtnCore, DtnPeer};
+use bp7::Bundle;
+use futures::channel::mpsc::Sender;
 use log::{error, info};
 
 /*
@@ -48,92 +53,98 @@ fn spawn_core_daemon(rx: Receiver<DtnCmd>) {
     }
 }*/
 
-async fn start_convergencylayers() {
-    info!("Starting convergency layers");
-
-    for cl in &mut (*DTNCORE.lock()).cl_list {
-        info!("Setup {}", cl);
-        cl.setup().await;
-    }
+pub struct DtnDaemon {
+    config: DtnConfig,
+    dtn_core: DtnCore,
+    peers: HashMap<String, DtnPeer>,
+    stats: DtnStatistics,
+    sender_task: Option<Sender<Bundle>>,
+    store: BundleStoresEnum,
 }
 
-pub async fn start_dtnd(cfg: DtnConfig) -> anyhow::Result<()> {
-    {
-        (*CONFIG.lock()).set(cfg);
-    }
-    info!("Local Node ID: {}", (*CONFIG.lock()).host_eid);
-
-    info!("Work Dir: {:?}", (*CONFIG.lock()).workdir);
-
-    let db = (*CONFIG.lock()).db.clone();
-    info!("DB Backend: {}", db);
-
-    (*STORE.lock()) = crate::core::store::new(&db);
-
-    info!(
-        "Announcement Interval: {}",
-        humantime::format_duration((*CONFIG.lock()).announcement_interval)
-    );
-
-    info!(
-        "Janitor Interval: {}",
-        humantime::format_duration((*CONFIG.lock()).janitor_interval)
-    );
-
-    info!(
-        "Peer Timeout: {}",
-        humantime::format_duration((*CONFIG.lock()).peer_timeout)
-    );
-
-    info!("Web Port: {}", (*CONFIG.lock()).webport);
-    info!("IPv4: {}", (*CONFIG.lock()).v4);
-    info!("IPv6: {}", (*CONFIG.lock()).v6);
-
-    let routing = (*CONFIG.lock()).routing.clone();
-    (*DTNCORE.lock()).routing_agent = crate::routing::new(&routing);
-
-    info!("RoutingAgent: {}", (*DTNCORE.lock()).routing_agent);
-
-    let clas = (*CONFIG.lock()).clas.clone();
-    for cla in &clas {
-        info!("Adding CLA: {}", cla);
-        cla_add(crate::cla::new(cla));
-    }
-
-    for s in &(*CONFIG.lock()).statics {
-        let port_str = if s.cla_list[0].1.is_some() {
-            format!(":{}", s.cla_list[0].1.unwrap())
-        } else {
-            "".into()
-        };
+impl DtnDaemon {
+    pub fn new(config: DtnConfig) -> Self {
+        info!("Local Node ID: {}", config.host_eid);
+        info!("Work Dir: {:?}", config.workdir);
+        info!("DB Backend: {}", config.db);
         info!(
-            "Adding static peer: {}://{}{}/{}",
-            s.cla_list[0].0,
-            s.addr,
-            port_str,
-            s.eid.node().unwrap()
+            "Announcement Interval: {}",
+            humantime::format_duration(config.announcement_interval)
         );
-        peers_add(s.clone());
-    }
+        info!(
+            "Janitor Interval: {}",
+            humantime::format_duration(config.janitor_interval)
+        );
 
-    let local_host_id = (*CONFIG.lock()).host_eid.clone();
-    (*DTNCORE.lock())
-        .register_application_agent(SimpleApplicationAgent::with(local_host_id.clone()).into());
-    for e in &(*CONFIG.lock()).endpoints {
-        let eid = local_host_id
-            .new_endpoint(e)
-            .expect("Error constructing new endpoint");
-        (*DTNCORE.lock()).register_application_agent(SimpleApplicationAgent::with(eid).into());
-    }
-    start_convergencylayers().await;
-    if CONFIG.lock().janitor_interval.as_micros() != 0 {
-        janitor::spawn_janitor();
-    }
-    if CONFIG.lock().announcement_interval.as_micros() != 0 {
-        if let Err(errmsg) = neighbour_discovery::spawn_neighbour_discovery().await {
-            error!("Error spawning service discovery: {:?}", errmsg);
+        info!(
+            "Peer Timeout: {}",
+            humantime::format_duration(config.peer_timeout)
+        );
+        info!("Web Port: {}", config.webport);
+        info!("IPv4: {}", config.v4);
+        info!("IPv6: {}", config.v6);
+        info!("RoutingAgent: {}", config.routing);
+
+        for cla in &config.clas {
+            info!("Adding CLA: {}", cla);
+            cla_add(cla::new(cla));
+        }
+
+        for s in config.statics {
+            let port_str = s.cla_list[0]
+                .1
+                .map(|v| format!("{}", v))
+                .unwrap_or("".into());
+            info!(
+                "Adding static peer: {}://{}:{}/{}",
+                s.cla_list[0].0,
+                s.addr,
+                port_str,
+                s.eid.node().unwrap()
+            );
+            peers_add(s.clone());
+        }
+
+        let local_host_id = config.host_eid;
+        let dtn_core = DtnCore::new();
+        dtn_core
+            .register_application_agent(SimpleApplicationAgent::with(local_host_id.clone()).into());
+        for e in &config.endpoints {
+            let eid = local_host_id
+                .new_endpoint(e)
+                .expect("Error constructing new endpoint");
+            dtn_core.register_application_agent(SimpleApplicationAgent::with(eid).into());
+        }
+
+        let store = store::new(&config.db);
+
+        dtn_core.routing_agent = routing::new(&config.routing);
+        Self {
+            config,
+            dtn_core,
+            peers: HashMap::new(),
+            stats: DtnStatistics::new(),
+            sender_task: None,
+            store,
         }
     }
-    httpd::spawn_httpd().await?;
-    Ok(())
+    pub async fn spawn_daemon(&mut self) -> anyhow::Result<()> {
+        info!("Starting convergency layers");
+        for cl in &mut self.dtn_core.cl_list {
+            info!("Setup {}", cl);
+            cl.setup();
+        }
+        if self.config.janitor_interval.as_micros() != 0 {
+            janitor::spawn_janitor();
+        }
+        if self.config.announcement_interval.as_micros() != 0 {
+            if let Err(errmsg) = neighbour_discovery::spawn_neighbour_discovery().await {
+                error!("Error spawning service discovery: {:?}", errmsg);
+            }
+        }
+        // to task
+        httpd::spawn_httpd().await?;
+        // mpsc queue poll and message processing
+        Ok(())
+    }
 }

@@ -237,10 +237,8 @@ impl MtcpConvergenceLayer {
             local_port: port.unwrap_or(16162),
         }
     }
-    pub async fn spawn_listener(&self) -> std::io::Result<()> {
-        // TODO: bubble up errors from run
-        tokio::spawn(self.run()); /*.await.unwrap()*/
-        Ok(())
+    fn spawn_listener(&self) -> tokio::task::JoinHandle<Result<(), io::Error>> {
+        tokio::spawn(self.run())
     }
     pub fn send_bundles(&self, addr: SocketAddr, bundles: Vec<ByteBuffer>) -> bool {
         // TODO: implement correct error handling
@@ -281,10 +279,8 @@ impl MtcpConvergenceLayer {
 
 #[async_trait]
 impl ConvergenceLayerAgent for MtcpConvergenceLayer {
-    async fn setup(&mut self) {
+    fn setup(&mut self) -> tokio::task::JoinHandle<Result<(), io::Error>> {
         self.spawn_listener()
-            .await
-            .expect("error setting up mtcp listener");
     }
     fn port(&self) -> u16 {
         self.local_port

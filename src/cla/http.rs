@@ -1,5 +1,4 @@
 use crate::cla::ConvergenceLayerAgent;
-use crate::CONFIG;
 use async_trait::async_trait;
 use bp7::ByteBuffer;
 use log::{debug, error};
@@ -22,7 +21,7 @@ impl HttpConvergenceLayer {
 
 #[async_trait]
 impl ConvergenceLayerAgent for HttpConvergenceLayer {
-    async fn setup(&mut self) {}
+    fn setup(&mut self) {}
     fn port(&self) -> u16 {
         self.local_port
     }

@@ -25,15 +25,6 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use tokio::sync::mpsc::Sender;
 
-lazy_static! {
-    pub static ref CONFIG: Mutex<DtnConfig> = Mutex::new(DtnConfig::new());
-    pub static ref DTNCORE: Mutex<DtnCore> = Mutex::new(DtnCore::new());
-    pub static ref PEERS: Mutex<HashMap<String, DtnPeer>> = Mutex::new(HashMap::new());
-    pub static ref STATS: Mutex<DtnStatistics> = Mutex::new(DtnStatistics::new());
-    pub static ref SENDERTASK: Mutex<Option<Sender<Bundle>>> = Mutex::new(None);
-    pub static ref STORE: Mutex<BundleStoresEnum> = Mutex::new(InMemoryBundleStore::new().into());
-}
-
 pub fn cla_add(cla: CLAEnum) {
     (*DTNCORE.lock()).cl_list.push(cla);
 }

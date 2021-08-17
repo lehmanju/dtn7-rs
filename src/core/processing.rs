@@ -1,15 +1,13 @@
 use crate::cla;
 use crate::core::bundlepack::*;
 use crate::core::*;
+use crate::is_local_node_id;
 use crate::peer_find_by_remote;
 use crate::peers_cla_for_node;
 use crate::routing::RoutingNotifcation;
 use crate::routing_notify;
 use crate::store_push_bundle;
 use crate::store_remove;
-use crate::CONFIG;
-use crate::DTNCORE;
-use crate::{is_local_node_id, STATS};
 
 use bp7::administrative_record::*;
 use bp7::bundle::BundleValidation;
@@ -187,6 +185,7 @@ async fn handle_hop_count_block(mut bundle: Bundle) -> Result<Bundle> {
     }
     Ok(bundle)
 }
+
 async fn handle_primary_lifetime(bundle: &Bundle) -> Result<()> {
     if bundle.primary.is_lifetime_exceeded() {
         warn!(
@@ -199,6 +198,7 @@ async fn handle_primary_lifetime(bundle: &Bundle) -> Result<()> {
     }
     Ok(())
 }
+
 /// UpdateBundleAge updates the bundle's Bundle Age block based on its reception
 /// timestamp, if such a block exists.
 fn update_bundle_age(bundle: &mut Bundle) -> Option<u64> {
