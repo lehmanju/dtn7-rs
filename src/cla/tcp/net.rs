@@ -77,6 +77,7 @@ impl TcpClPacket {
                     let tid: u64 = reader.read_u64().await?;
                     if flags.contains(XferSegmentFlags::START) {
                         let ext_len: u32 = reader.read_u32().await?;
+                        // parse bundle ids that are request
                         if ext_len != 0 {
                             warn!("transfer extension are unsupported, ignoring them!");
                         }

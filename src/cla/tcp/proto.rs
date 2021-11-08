@@ -131,6 +131,14 @@ pub(crate) struct XferSegData {
     pub tid: u64,
     pub len: u64,
     pub buf: Bytes,
+    pub extension: XferSegExtension,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum XferSegExtension {
+    None,
+    BundleTransferRequest(String),
+    BundleTransferResponse(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
