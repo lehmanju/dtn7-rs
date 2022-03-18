@@ -53,7 +53,7 @@ type SessionMap = HashMap<SocketAddr, mpsc::Sender<(ByteBuffer, oneshot::Sender<
 const KEEPALIVE: u16 = 30;
 const SEGMENT_MRU: u64 = 64000;
 const TRANSFER_MRU: u64 = 64000;
-const INTERNAL_CHANNEL_BUFFER: usize = 50;
+const INTERNAL_CHANNEL_BUFFER: usize = 100;
 
 lazy_static! {
     pub static ref TCP_CONNECTIONS: Mutex<SessionMap> = Mutex::new(HashMap::new());
@@ -748,18 +748,12 @@ impl TcpConvergenceLayer {
                             "TcpConvergenceLayer: received transfer command for {}",
                             remote
                         );
-                        tokio::spawn(async move {
-                            if let Err(e) = tcp_send_bundles(
-                                remote.clone(),
-                                data,
-                                refuse_existing_bundles,
-                                reply,
-                            )
-                            .await
-                            {
-                                error!("Failed to send data to {}: {}", remote, e);
-                            }
-                        });
+                        if let Err(e) =
+                            tcp_send_bundles(remote.clone(), data, refuse_existing_bundles, reply)
+                                .await
+                        {
+                            error!("Failed to send data to {}: {}", remote, e);
+                        }
                     }
                     super::ClaCmd::Shutdown => {
                         debug!("TcpConvergenceLayer: received shutdown command");
