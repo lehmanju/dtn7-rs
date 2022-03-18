@@ -93,6 +93,13 @@ struct TcpSession {
     _local_session_data: SessInitData,
     last_tid: u64,
     rx_session_queue: mpsc::Receiver<(Vec<u8>, Sender<TransferResult>)>,
+    transfers: HashMap<u64, Transfer>,
+}
+
+#[derive(Debug)]
+enum Transfer {
+    Request(Vec<u8>, tokio::sync::oneshot::Sender<TransferResult>),
+    Sending(u64, tokio::sync::oneshot::Sender<TransferResult>),
 }
 
 enum ReceiveState {
@@ -103,8 +110,6 @@ enum ReceiveState {
 
 enum SendState {
     Idle,
-    Sending(u64, tokio::sync::oneshot::Sender<TransferResult>),
-    TransferRequest(Vec<u8>, tokio::sync::oneshot::Sender<TransferResult>),
     Terminated,
 }
 
@@ -170,7 +175,7 @@ impl TcpSession {
                         },
                     }
                 }
-                queue_bundle = self.rx_session_queue.recv(), if matches!(state.1, SendState::Idle) => {
+                queue_bundle = self.rx_session_queue.recv() => {
                     match queue_bundle {
                         Some(bundle) => {
                             match self.send(bundle).await {
@@ -222,28 +227,23 @@ impl TcpSession {
         }
         (ReceiveState::Terminated, SendState::Terminated)
     }
-    async fn process_bundle(&mut self, vec: Vec<u8>, tid: u64) -> anyhow::Result<ReceiveState> {
-        match Bundle::try_from(vec) {
-            Ok(bundle) => {
-                tokio::spawn(async move {
-                    if let Err(err) = crate::core::processing::receive(bundle).await {
-                        error!("Failed to process bundle: {}", err);
-                    }
-                });
-                Ok(ReceiveState::Idle)
+    async fn process_bundle(&mut self, vec: Vec<u8>) -> anyhow::Result<ReceiveState> {
+        tokio::spawn(async move {
+            match Bundle::try_from(vec) {
+                Ok(bundle) => {
+                    tokio::spawn(async move {
+                        if let Err(err) = crate::core::processing::receive(bundle).await {
+                            error!("Failed to process bundle: {}", err);
+                        }
+                    });
+                }
+                Err(err) => {
+                    error!("Failed to parse bundle: {}", err);
+                    //error!("Failed bytes: {}", bp7::helpers::hexify(&vec));
+                }
             }
-            Err(err) => {
-                error!("Failed to parse bundle: {}", err);
-                //error!("Failed bytes: {}", bp7::helpers::hexify(&vec));
-                TcpClPacket::XferRefuse(XferRefuseData {
-                    reason: XferRefuseReasonCode::NotAcceptable,
-                    tid,
-                })
-                .write(&mut self.writer)
-                .await?;
-                Ok(ReceiveState::Idle)
-            }
-        }
+        });
+        Ok(ReceiveState::Idle)
     }
     /// Receive a new packet.
     /// Returns once transfer is finished and session is idle again.
@@ -295,7 +295,7 @@ impl TcpSession {
                         .await?;
 
                         if data.flags.contains(XferSegmentFlags::END) {
-                            Ok((self.process_bundle(buffer, data.tid).await?, send_state))
+                            Ok((self.process_bundle(buffer).await?, send_state))
                         } else {
                             Ok((ReceiveState::Receiving(buffer, data.tid), send_state))
                         }
@@ -342,7 +342,7 @@ impl TcpSession {
                         .write(&mut self.writer)
                         .await?;
                         if data.flags.contains(XferSegmentFlags::END) {
-                            Ok((self.process_bundle(vec, data.tid).await?, send_state))
+                            Ok((self.process_bundle(vec).await?, send_state))
                         } else {
                             Ok((ReceiveState::Receiving(vec, data.tid), send_state))
                         }
@@ -351,50 +351,61 @@ impl TcpSession {
                 }
             }
             TcpClPacket::XferAck(ack_data) => match send_state {
-                SendState::TransferRequest(data, response) => {
-                    if ack_data.tid != self.last_tid {
-                        return Err(TcpSessionError::Protocol(packet).into());
-                    }
-                    return Ok((receive_state, self.send_bundle(data, response).await?));
-                }
-                SendState::Sending(len, response) => {
-                    if ack_data.tid != self.last_tid {
-                        return Err(TcpSessionError::Protocol(packet).into());
-                    }
-                    if ack_data.len < len {
-                        Ok((receive_state, SendState::Sending(len, response)))
-                    } else {
-                        if let Err(err) = response.send(TransferResult::Successful) {
-                            error!("Failed to send response: {:?}", err);
-                            return Err(TcpSessionError::Protocol(packet).into());
+                SendState::Idle => {
+                    let transfer = self.transfers.remove(&ack_data.tid);
+                    match transfer {
+                        Some(transfer) => {
+                            match transfer {
+                                Transfer::Request(data, response) => {
+                                    return Ok((
+                                        receive_state,
+                                        self.send_bundle(data, response).await?,
+                                    ));
+                                }
+                                Transfer::Sending(len, response) => {
+                                    if ack_data.len == len {
+                                        if let Err(err) = response.send(TransferResult::Successful)
+                                        {
+                                            error!("Failed to send response: {:?}", err);
+                                            return Err(TcpSessionError::Protocol(packet).into());
+                                        }
+                                    } else {
+                                        self.transfers
+                                            .insert(ack_data.tid, Transfer::Sending(len, response));
+                                    }
+                                }
+                            }
+                            Ok((receive_state, SendState::Idle))
                         }
-
-                        Ok((receive_state, SendState::Idle))
+                        None => Err(TcpSessionError::Protocol(packet).into()),
                     }
                 }
                 _ => Err(TcpSessionError::Protocol(packet).into()),
             },
             TcpClPacket::XferRefuse(refuse_data) => match send_state {
-                SendState::TransferRequest(_, response) => {
-                    if refuse_data.tid != self.last_tid {
-                        return Err(TcpSessionError::Protocol(packet).into());
+                SendState::Idle => {
+                    let transfer = self.transfers.remove(&refuse_data.tid);
+                    match transfer {
+                        Some(transfer) => {
+                            match transfer {
+                                Transfer::Request(_, response) => {
+                                    debug!("Received refuse");
+                                    if response.send(TransferResult::Successful).is_err() {
+                                        error!("Failed to send response");
+                                        return Err(TcpSessionError::Protocol(packet).into());
+                                    }
+                                }
+                                Transfer::Sending(_, response) => {
+                                    if response.send(TransferResult::Failure).is_err() {
+                                        error!("Failed to send response");
+                                        return Err(TcpSessionError::Protocol(packet).into());
+                                    }
+                                }
+                            }
+                            Ok((receive_state, SendState::Idle))
+                        }
+                        None => Err(TcpSessionError::Protocol(packet).into()),
                     }
-                    debug!("Received refuse");
-                    if response.send(TransferResult::Successful).is_err() {
-                        error!("Failed to send response");
-                        return Err(TcpSessionError::Protocol(packet).into());
-                    }
-                    Ok((receive_state, SendState::Idle))
-                }
-                SendState::Sending(_, response) => {
-                    if refuse_data.tid != self.last_tid {
-                        return Err(TcpSessionError::Protocol(packet).into());
-                    }
-                    if response.send(TransferResult::Failure).is_err() {
-                        error!("Failed to send response");
-                        return Err(TcpSessionError::Protocol(packet).into());
-                    }
-                    Ok((receive_state, SendState::Idle))
                 }
                 _ => Err(TcpSessionError::Protocol(packet).into()),
             },
@@ -427,7 +438,9 @@ impl TcpSession {
                 extensions: vec![extension],
             });
             request_packet.write(&mut self.writer).await?;
-            Ok(SendState::TransferRequest(bndl_buf, tx_result))
+            self.transfers
+                .insert(self.last_tid, Transfer::Request(bndl_buf, tx_result));
+            Ok(SendState::Idle)
         } else {
             self.send_bundle(bndl_buf, tx_result).await
         }
@@ -438,6 +451,7 @@ impl TcpSession {
         tx_result: tokio::sync::oneshot::Sender<TransferResult>,
     ) -> anyhow::Result<SendState> {
         let now = Instant::now();
+        let bndl_len = bndl_buf.len();
         let mut byte_vec = Vec::new();
         // split bundle data into chunks the size of remote maximum segment size
         for bytes in bndl_buf.chunks(self.remote_session_data.segment_mru as usize) {
@@ -482,7 +496,9 @@ impl TcpSession {
             bndl_buf.len(),
             self.addr
         );
-        Ok(SendState::Sending(bndl_buf.len() as u64, tx_result))
+        self.transfers
+            .insert(self.last_tid, Transfer::Sending(bndl_len as u64, tx_result));
+        Ok(SendState::Idle)
     }
 }
 
@@ -585,6 +601,7 @@ impl TcpConnection {
                     _local_session_data: local_parameters,
                     last_tid: 0u64,
                     rx_session_queue,
+                    transfers: HashMap::new(),
                 };
                 session.run().await;
             }
