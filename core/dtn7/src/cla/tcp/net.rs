@@ -212,20 +212,20 @@ impl TcpClPacket {
                 }
             }
         } else if mtype == b'd' {
-            let mut buf: [u8; 6] = [0; 6];
+            let mut buf: [u8; 5] = [0; 5];
             reader.read_exact(&mut buf).await?;
-            if &buf[0..4] != b"dtn!" {
-                return Err(TcpClError::InvalidMagic);
+            if &buf[0..3] != b"tn!" {
+                return Err(TcpClError::InvalidMagic.into());
             }
-            if buf[4] != 4 {
-                return Err(TcpClError::UnsupportedVersion);
+            if buf[3] != 4 {
+                return Err(TcpClError::UnsupportedVersion.into());
             }
             Ok(TcpClPacket::ContactHeader(
-                ContactHeaderFlags::from_bits_truncate(buf[5]),
+                ContactHeaderFlags::from_bits_truncate(buf[4]),
             ))
         } else {
             // unknown  code
-            Err(TcpClError::UnknownPacketType(mtype))
+            Err(TcpClError::UnknownPacketType(mtype).into())
         }
     }
 }

@@ -543,15 +543,12 @@ impl TcpConnection {
     }
 
     async fn receive_contact_header(&mut self) -> anyhow::Result<ContactHeaderFlags> {
-        let mut buf: [u8; 6] = [0; 6];
-        self.reader.read_exact(&mut buf).await?;
-        if &buf[0..4] != b"dtn!" {
-            bail!("Invalid magic");
+        let response = TcpClPacket::read(&mut self.reader).await?;
+        if let TcpClPacket::ContactHeader(flags) = response {
+            Ok(flags)
+        } else {
+            Err(TcpClError::UnexpectedPacket.into())
         }
-        if buf[4] != 4 {
-            bail!("Unsupported version");
-        }
-        Ok(ContactHeaderFlags::from_bits_truncate(buf[5]))
     }
 
     /// Establish a tcp session on this connection and insert it into a session list.
